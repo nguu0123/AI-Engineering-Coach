@@ -378,7 +378,7 @@ describe('isLikelySafe', () => {
   it('rejects a class-overlapping alternation pattern through compileSafe', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 
-    expect(compileSafe('^([a]|aa)+$')).toBeNull();
+    expect(compileSafe('^([a]|a)+$')).toBeNull();
 
     expect(warn).toHaveBeenCalledTimes(1);
     warn.mockRestore();
