@@ -13,7 +13,7 @@ import * as path from 'path';
 import { describe, it, expect } from 'vitest';
 import { hasExternalHarnessSources } from './parser-harnesses';
 
-function setEnv(key: 'HOME' | 'USERPROFILE', value: string | undefined): void {
+function setEnv(key: 'HOME' | 'USERPROFILE' | 'XDG_DATA_HOME', value: string | undefined): void {
   if (value === undefined) delete process.env[key]; else process.env[key] = value;
 }
 
@@ -23,15 +23,18 @@ function setEnv(key: 'HOME' | 'USERPROFILE', value: string | undefined): void {
 function withHome(setup: (home: string) => void, body: () => void): void {
   const prevHome = process.env.HOME;
   const prevUserProfile = process.env.USERPROFILE;
+  const prevXdgDataHome = process.env.XDG_DATA_HOME;
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'harness-home-'));
   process.env.HOME = home;
   process.env.USERPROFILE = home;
+  delete process.env.XDG_DATA_HOME;
   try {
     setup(home);
     body();
   } finally {
     setEnv('HOME', prevHome);
     setEnv('USERPROFILE', prevUserProfile);
+    setEnv('XDG_DATA_HOME', prevXdgDataHome);
     fs.rmSync(home, { recursive: true, force: true });
   }
 }

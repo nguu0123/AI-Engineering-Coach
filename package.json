@@ -306,6 +306,7 @@
     "check": "npm run typecheck && npm run lint && npm run spellcheck && npm run knip && npm run test",
     "check-size": "node scripts/check-bundle-size.mjs",
     "test:e2e": "npx playwright test",
+    "test:e2e:opencode": "npx playwright test --config=playwright.opencode.config.ts",
     "lockfile-lint": "lockfile-lint",
     "prepare": "husky"
   },

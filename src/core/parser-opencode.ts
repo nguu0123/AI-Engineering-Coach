@@ -5,7 +5,11 @@
 
 /* OpenCode session parser
  *
- * Data layout (macOS):
+ * Current OpenCode stores sessions in SQLite under its XDG data directory:
+ *   ~/.local/share/opencode/opencode.db
+ *   ~/.local/share/opencode/opencode-<channel>.db
+ *
+ * Legacy OpenCode also used JSON files:
  *   ~/.local/share/opencode/storage/session/global/<session-id>.json   -- session metadata
  *   ~/.local/share/opencode/storage/message/<session-id>/<msg-id>.json -- message metadata
  *   ~/.local/share/opencode/storage/part/<msg-id>/<part-id>.json       -- content parts (text, tool, step-start/finish)
@@ -27,8 +31,11 @@ interface OcSession {
   version?: string;
   projectID?: string;
   directory?: string;
+  path?: string;
   title?: string;
   time?: { created?: number; updated?: number };
+  agent?: string;
+  model?: { id?: string; providerID?: string; modelID?: string; variant?: string };
 }
 
 interface OcMessage {
@@ -46,7 +53,7 @@ interface OcMessage {
   finish?: string;
   summary?: { title?: string; diffs?: unknown[] };
   variant?: string;
-  model?: { providerID?: string; modelID?: string };
+  model?: { providerID?: string; modelID?: string; id?: string; variant?: string };
 }
 
 interface OcPart {
@@ -57,7 +64,14 @@ interface OcPart {
   text?: string;
   tool?: string;
   callID?: string;
-  state?: { status?: string; input?: Record<string, unknown>; output?: string };
+  state?: {
+    status?: string;
+    input?: Record<string, unknown>;
+    output?: string;
+    outputPaths?: string[];
+    result?: unknown;
+    content?: unknown;
+  };
   tokens?: { input?: number; output?: number; reasoning?: number };
   cost?: number;
   reason?: string;
@@ -72,20 +86,68 @@ interface OpenCodeAssistantData {
   totalElapsed: number | null;
   lastTs: number | null;
   tokenSource: OcMessage['tokens'] | null;
+  variant?: string;
 }
 
 const WRITE_TOOLS = new Set(['write', 'edit', 'create', 'patch']);
 const READ_TOOLS = new Set(['read', 'glob', 'grep', 'ls', 'find']);
 
+type JsonRecord = Record<string, unknown>;
+type SqliteRow = Record<string, unknown>;
+
+interface SqliteStatement {
+  all(...args: unknown[]): SqliteRow[];
+  get(...args: unknown[]): SqliteRow | undefined;
+}
+
+interface SqliteDatabase {
+  prepare(sql: string): SqliteStatement;
+  close(): void;
+}
+
+interface SqliteDatabaseConstructor {
+  new (filename: string, options: { readOnly?: boolean; readonly?: boolean }): SqliteDatabase;
+}
+
 export function findOpenCodeDirs(): string[] {
   const home = process.env.HOME || process.env.USERPROFILE || '';
   const dirs: string[] = [];
+  const dataDirs = getOpenCodeDataDirs(home);
 
-  // macOS / Linux
-  const linuxPath = path.join(home, '.local', 'share', 'opencode', 'storage');
-  if (fs.existsSync(linuxPath)) dirs.push(linuxPath);
+  const envDb = process.env.OPENCODE_DB;
+  if (envDb && envDb !== ':memory:') {
+    for (const dataDir of dataDirs) {
+      const dbPath = path.isAbsolute(envDb) ? envDb : path.join(dataDir, envDb);
+      if (fs.existsSync(dbPath)) dirs.push(dbPath);
+    }
+  }
 
-  return dirs;
+  for (const dataDir of dataDirs) {
+    const defaultDb = path.join(dataDir, 'opencode.db');
+    if (fs.existsSync(defaultDb)) dirs.push(defaultDb);
+
+    try {
+      for (const entry of fs.readdirSync(dataDir, { withFileTypes: true })) {
+        if (entry.isFile() && /^opencode-.+\.db$/i.test(entry.name)) {
+          dirs.push(path.join(dataDir, entry.name));
+        }
+      }
+    } catch {
+      /* skip unreadable dirs */
+    }
+
+    const legacyStorage = path.join(dataDir, 'storage');
+    if (fs.existsSync(legacyStorage)) dirs.push(legacyStorage);
+  }
+
+  return [...new Set(dirs.map(dir => path.resolve(dir)))];
+}
+
+function getOpenCodeDataDirs(home: string): string[] {
+  const dirs: string[] = [];
+  if (process.env.XDG_DATA_HOME) dirs.push(path.join(process.env.XDG_DATA_HOME, 'opencode'));
+  if (home) dirs.push(path.join(home, '.local', 'share', 'opencode'));
+  return [...new Set(dirs.map(dir => path.resolve(dir)))];
 }
 
 function readJsonSafe<T>(filePath: string): T | null {
@@ -110,6 +172,84 @@ function readAllJsonInDir<T>(dir: string): T[] {
     /* skip unreadable dirs */
   }
   return results;
+}
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function recordFromUnknown(value: unknown): JsonRecord {
+  if (isRecord(value)) return value;
+  if (typeof value !== 'string') return {};
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function arrayFromUnknown(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function stringFromUnknown(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function numberFromUnknown(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return numeric;
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function stringArrayFromUnknown(value: unknown): string[] {
+  return arrayFromUnknown(value).filter((item): item is string => typeof item === 'string' && item.length > 0);
+}
+
+function parseModel(value: unknown): OcMessage['model'] {
+  const model = recordFromUnknown(value);
+  const modelID = stringFromUnknown(model.modelID) || stringFromUnknown(model.id);
+  const providerID = stringFromUnknown(model.providerID);
+  const variant = stringFromUnknown(model.variant);
+  if (!modelID && !providerID && !variant) return undefined;
+  return { id: modelID, modelID, providerID, variant };
+}
+
+function parseTokens(value: unknown): OcMessage['tokens'] | undefined {
+  const tokens = recordFromUnknown(value);
+  if (Object.keys(tokens).length === 0) return undefined;
+  const cache = recordFromUnknown(tokens.cache);
+  return {
+    input: numberFromUnknown(tokens.input),
+    output: numberFromUnknown(tokens.output),
+    reasoning: numberFromUnknown(tokens.reasoning),
+    cache: {
+      read: numberFromUnknown(cache.read),
+      write: numberFromUnknown(cache.write),
+    },
+  };
+}
+
+function parseTime(data: JsonRecord, row?: SqliteRow): { created?: number; completed?: number } {
+  const time = recordFromUnknown(data.time);
+  return {
+    created: numberFromUnknown(time.created) ?? numberFromUnknown(row?.time_created),
+    completed: numberFromUnknown(time.completed) ?? numberFromUnknown(row?.time_updated),
+  };
+}
+
+function rowString(row: SqliteRow, key: string): string | undefined {
+  return stringFromUnknown(row[key]);
+}
+
+function rowNumber(row: SqliteRow, key: string): number | undefined {
+  return numberFromUnknown(row[key]);
 }
 
 function projectNameFromDir(directory: string): string {
@@ -145,6 +285,7 @@ function applyOpenCodePart(part: OcPart, data: Pick<OpenCodeAssistantData, 'tool
 
   data.toolsUsed.push(part.tool);
   const input = part.state?.input || {};
+  const outputPaths = part.state?.outputPaths || [];
   const filePath = typeof input.filePath === 'string'
     ? input.filePath
     : typeof input.file_path === 'string'
@@ -152,11 +293,11 @@ function applyOpenCodePart(part: OcPart, data: Pick<OpenCodeAssistantData, 'tool
       : typeof input.path === 'string'
         ? input.path
         : null;
-  if (!filePath) return;
 
   const toolLower = part.tool.toLowerCase();
   if (WRITE_TOOLS.has(toolLower)) {
-    data.editedFiles.push(filePath);
+    const editedFiles = filePath ? [filePath, ...outputPaths] : outputPaths;
+    data.editedFiles.push(...editedFiles);
     // Include generated code content so extractCodeBlocks() can detect AI-produced code.
     // Write tools store the code in various input fields; also check state.output.
     const content = typeof input.content === 'string' ? input.content
@@ -165,10 +306,10 @@ function applyOpenCodePart(part: OcPart, data: Pick<OpenCodeAssistantData, 'tool
           : typeof part.state?.output === 'string' ? part.state.output
             : null;
     if (content) {
-      const ext = filePath.split('.').pop() || 'unknown';
+      const ext = (filePath || outputPaths[0] || '').split('.').pop() || 'unknown';
       textParts.push(`\n\`\`\`${ext}\n${content}\n\`\`\`\n`);
     }
-  } else if (READ_TOOLS.has(toolLower)) {
+  } else if (READ_TOOLS.has(toolLower) && filePath) {
     data.referencedFiles.push(filePath);
   }
 }
@@ -188,6 +329,7 @@ function collectAssistantData(
     totalElapsed: null,
     lastTs,
     tokenSource: null,
+    variant: undefined,
   };
   if (!assistantMsg) return data;
 
@@ -197,6 +339,7 @@ function collectAssistantData(
 
   data.modelId = assistantMsg.modelID || '';
   data.tokenSource = assistantMsg.tokens ?? null;
+  data.variant = assistantMsg.variant;
 
   const textParts: string[] = [];
   const parts = partsByMsg.get(assistantMsg.id) || [];
@@ -225,6 +368,228 @@ function getOpenCodeWorkspace(rawSession: OcSession): { wsId: string; wsName: st
       ? projectNameFromDir(rawSession.directory)
       : rawSession.title || rawSession.slug || 'unknown',
   };
+}
+
+function loadDatabaseSync(): SqliteDatabaseConstructor | null {
+  try {
+    // Optional runtime dependency: older VS Code/Electron builds may not expose node:sqlite.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const sqlite = require('node:sqlite') as { DatabaseSync?: unknown };
+    return typeof sqlite.DatabaseSync === 'function'
+      ? sqlite.DatabaseSync as SqliteDatabaseConstructor
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function tableExists(db: SqliteDatabase, tableName: string): boolean {
+  try {
+    const row = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(tableName);
+    return row != null;
+  } catch {
+    return false;
+  }
+}
+
+function sessionFromSqliteRow(row: SqliteRow): OcSession | null {
+  const id = rowString(row, 'id');
+  if (!id) return null;
+  return {
+    id,
+    slug: rowString(row, 'slug'),
+    version: rowString(row, 'version'),
+    projectID: rowString(row, 'project_id'),
+    directory: rowString(row, 'directory'),
+    path: rowString(row, 'path'),
+    title: rowString(row, 'title'),
+    time: {
+      created: rowNumber(row, 'time_created'),
+      updated: rowNumber(row, 'time_updated'),
+    },
+    agent: rowString(row, 'agent'),
+    model: parseModel(row.model),
+  };
+}
+
+function sqliteToolPartFromContent(sessionID: string, messageID: string, content: JsonRecord, index: number): OcPart | null {
+  if (content.type === 'text') {
+    return {
+      id: stringFromUnknown(content.id) || `${messageID}-text-${String(index)}`,
+      sessionID,
+      messageID,
+      type: 'text',
+      text: stringFromUnknown(content.text),
+    };
+  }
+  if (content.type !== 'tool') return null;
+
+  const state = recordFromUnknown(content.state);
+  return {
+    id: stringFromUnknown(content.id) || `${messageID}-tool-${String(index)}`,
+    sessionID,
+    messageID,
+    type: 'tool',
+    tool: stringFromUnknown(content.name),
+    state: {
+      status: stringFromUnknown(state.status),
+      input: recordFromUnknown(state.input),
+      output: stringFromUnknown(state.output) || stringFromUnknown(state.result),
+      outputPaths: stringArrayFromUnknown(state.outputPaths),
+      result: state.result,
+      content: state.content,
+    },
+  };
+}
+
+function sqliteV2Messages(rawSession: OcSession, rows: SqliteRow[]): { messages: OcMessage[]; partsByMsg: Map<string, OcPart[]> } {
+  const messages: OcMessage[] = [];
+  const partsByMsg = new Map<string, OcPart[]>();
+  let lastUserId: string | undefined;
+  let currentAgent = rawSession.agent;
+  let currentModel = rawSession.model;
+
+  for (const row of rows) {
+    const data = recordFromUnknown(row.data);
+    const id = rowString(row, 'id') || stringFromUnknown(data.id);
+    const type = rowString(row, 'type') || stringFromUnknown(data.type);
+    if (!id || !type) continue;
+
+    if (type === 'agent-switched') {
+      currentAgent = stringFromUnknown(data.agent) || currentAgent;
+      continue;
+    }
+    if (type === 'model-switched') {
+      currentModel = parseModel(data.model) || currentModel;
+      continue;
+    }
+    if (type === 'user') {
+      const text = stringFromUnknown(data.text) || '';
+      messages.push({
+        id,
+        sessionID: rawSession.id,
+        role: 'user',
+        time: parseTime(data, row),
+        summary: { title: text },
+        agent: currentAgent,
+        model: currentModel,
+        variant: currentModel?.variant,
+      });
+      partsByMsg.set(id, [{ id: `${id}-text`, sessionID: rawSession.id, messageID: id, type: 'text', text }]);
+      lastUserId = id;
+      continue;
+    }
+    if (type !== 'assistant') continue;
+
+    const model = parseModel(data.model) || currentModel;
+    messages.push({
+      id,
+      sessionID: rawSession.id,
+      role: 'assistant',
+      parentID: lastUserId,
+      time: parseTime(data, row),
+      agent: stringFromUnknown(data.agent) || currentAgent,
+      modelID: model?.modelID || model?.id,
+      providerID: model?.providerID,
+      model,
+      variant: model?.variant,
+      cost: numberFromUnknown(data.cost),
+      tokens: parseTokens(data.tokens),
+      finish: stringFromUnknown(data.finish),
+    });
+
+    const parts = arrayFromUnknown(data.content)
+      .map((part, index) => isRecord(part) ? sqliteToolPartFromContent(rawSession.id, id, part, index) : null)
+      .filter((part): part is OcPart => part != null);
+    if (parts.length > 0) partsByMsg.set(id, parts);
+  }
+
+  return { messages, partsByMsg };
+}
+
+function inlinePartFromV1(message: OcMessage, part: JsonRecord, index: number): OcPart | null {
+  const type = stringFromUnknown(part.type);
+  if (!type) return null;
+  const id = stringFromUnknown(part.id) || `${message.id}-inline-${String(index)}`;
+  if (type === 'tool-invocation') {
+    const invocation = recordFromUnknown(part.toolInvocation);
+    return {
+      id,
+      sessionID: message.sessionID,
+      messageID: message.id,
+      type: 'tool',
+      tool: stringFromUnknown(invocation.toolName),
+      callID: stringFromUnknown(invocation.toolCallId),
+      state: {
+        status: stringFromUnknown(invocation.state),
+        input: recordFromUnknown(invocation.args),
+        output: stringFromUnknown(invocation.result),
+      },
+    };
+  }
+  return {
+    id,
+    sessionID: message.sessionID,
+    messageID: message.id,
+    type,
+    text: stringFromUnknown(part.text),
+    tool: stringFromUnknown(part.tool),
+    callID: stringFromUnknown(part.callID),
+    state: isRecord(part.state)
+      ? {
+          status: stringFromUnknown(part.state.status),
+          input: recordFromUnknown(part.state.input),
+          output: stringFromUnknown(part.state.output),
+        }
+      : undefined,
+  };
+}
+
+function sqliteV1MessageFromRow(row: SqliteRow): { message: OcMessage; inlineParts: OcPart[] } | null {
+  const data = recordFromUnknown(row.data);
+  const metadata = recordFromUnknown(data.metadata);
+  const assistantMetadata = recordFromUnknown(metadata.assistant);
+  const id = rowString(row, 'id') || stringFromUnknown(data.id);
+  const sessionID = rowString(row, 'session_id') || stringFromUnknown(data.sessionID) || stringFromUnknown(metadata.sessionID);
+  const role = stringFromUnknown(data.role);
+  if (!id || !sessionID || !role) return null;
+
+  const model = parseModel(data.model);
+  const summary = recordFromUnknown(data.summary);
+  const message: OcMessage = {
+    id,
+    sessionID,
+    role,
+    time: parseTime(Object.keys(metadata).length > 0 ? metadata : data, row),
+    parentID: stringFromUnknown(data.parentID),
+    modelID: stringFromUnknown(data.modelID) || stringFromUnknown(assistantMetadata.modelID) || model?.modelID || model?.id,
+    providerID: stringFromUnknown(data.providerID) || stringFromUnknown(assistantMetadata.providerID) || model?.providerID,
+    mode: stringFromUnknown(data.mode),
+    agent: stringFromUnknown(data.agent),
+    cost: numberFromUnknown(data.cost) ?? numberFromUnknown(assistantMetadata.cost),
+    tokens: parseTokens(data.tokens) || parseTokens(assistantMetadata.tokens),
+    finish: stringFromUnknown(data.finish),
+    summary: Object.keys(summary).length > 0 ? summary : undefined,
+    variant: stringFromUnknown(data.variant) || model?.variant,
+    model,
+  };
+
+  const inlineParts = arrayFromUnknown(data.parts)
+    .map((part, index) => isRecord(part) ? inlinePartFromV1(message, part, index) : null)
+    .filter((part): part is OcPart => part != null);
+  return { message, inlineParts };
+}
+
+function sqliteV1PartFromRow(row: SqliteRow): OcPart | null {
+  const message: OcMessage = {
+    id: rowString(row, 'message_id') || '',
+    sessionID: rowString(row, 'session_id') || '',
+    role: 'assistant',
+  };
+  if (!message.id || !message.sessionID) return null;
+  return inlinePartFromV1(message, { ...recordFromUnknown(row.data), id: rowString(row, 'id') }, 0);
 }
 
 function buildOpenCodeRequest(
@@ -256,7 +621,7 @@ function buildOpenCodeRequest(
     cacheReadTokens: cacheRead > 0 ? cacheRead : null,
     cacheWriteTokens: cacheWrite > 0 ? cacheWrite : null,
     // OpenCode stores reasoning effort as "variant" on user messages
-    reasoningEffort: canonicalizeReasoningEffort(msg.variant)
+    reasoningEffort: canonicalizeReasoningEffort(msg.variant || assistantData.variant)
       ?? extractReasoningEffortFromModelId(assistantData.modelId),
   });
 }
@@ -267,9 +632,17 @@ function parseOpenCodeSession(rawSession: OcSession, storageDir: string): Sessio
   const msgDir = path.join(storageDir, 'message', rawSession.id);
   const rawMessages = readAllJsonInDir<OcMessage>(msgDir);
   rawMessages.sort((a, b) => (a.time?.created || 0) - (b.time?.created || 0));
+  const partsByMsg = indexPartsByMessage(rawMessages, storageDir);
+  return parseOpenCodeSessionFromMessages(rawSession, rawMessages, partsByMsg);
+}
+
+function parseOpenCodeSessionFromMessages(
+  rawSession: OcSession,
+  rawMessages: OcMessage[],
+  partsByMsg: Map<string, OcPart[]>,
+): Session | null {
   if (rawMessages.length === 0) return null;
 
-  const partsByMsg = indexPartsByMessage(rawMessages, storageDir);
   const { wsId, wsName } = getOpenCodeWorkspace(rawSession);
   const requests: SessionRequest[] = [];
   let firstTs: number | null = null;
@@ -304,7 +677,80 @@ function parseOpenCodeSession(rawSession: OcSession, storageDir: string): Sessio
   });
 }
 
+function parseOpenCodeSqliteSession(rawSession: OcSession, db: SqliteDatabase): Session | null {
+  if (tableExists(db, 'session_message')) {
+    const rows = db
+      .prepare('SELECT * FROM session_message WHERE session_id = ? ORDER BY seq ASC, time_created ASC, id ASC')
+      .all(rawSession.id);
+    const normalized = sqliteV2Messages(rawSession, rows);
+    const session = parseOpenCodeSessionFromMessages(rawSession, normalized.messages, normalized.partsByMsg);
+    if (session) return session;
+  }
+
+  if (!tableExists(db, 'message')) return null;
+  const rows = db
+    .prepare('SELECT * FROM message WHERE session_id = ? ORDER BY time_created ASC, id ASC')
+    .all(rawSession.id);
+  const rawMessages: OcMessage[] = [];
+  let partsByMsg = new Map<string, OcPart[]>();
+  for (const row of rows) {
+    const normalized = sqliteV1MessageFromRow(row);
+    if (!normalized) continue;
+    rawMessages.push(normalized.message);
+    if (normalized.inlineParts.length > 0) partsByMsg.set(normalized.message.id, normalized.inlineParts);
+  }
+
+  if (tableExists(db, 'part')) {
+    partsByMsg = new Map(partsByMsg);
+    const partRows = db
+      .prepare('SELECT * FROM part WHERE session_id = ? ORDER BY time_created ASC, id ASC')
+      .all(rawSession.id);
+    for (const row of partRows) {
+      const part = sqliteV1PartFromRow(row);
+      if (!part) continue;
+      const parts = partsByMsg.get(part.messageID) || [];
+      parts.push(part);
+      partsByMsg.set(part.messageID, parts);
+    }
+  }
+
+  return parseOpenCodeSessionFromMessages(rawSession, rawMessages, partsByMsg);
+}
+
+function parseOpenCodeSqliteSessions(dbPath: string): Session[] {
+  const DatabaseSync = loadDatabaseSync();
+  if (!DatabaseSync) return [];
+  try {
+    assertTrustedPath(dbPath);
+    const db = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      if (!tableExists(db, 'session')) return [];
+      const rawSessions = db
+        .prepare('SELECT * FROM session ORDER BY time_created ASC, id ASC')
+        .all()
+        .map(sessionFromSqliteRow)
+        .filter((session): session is OcSession => session != null);
+      const sessions: Session[] = [];
+      for (const rawSession of rawSessions) {
+        const session = parseOpenCodeSqliteSession(rawSession, db);
+        if (session) sessions.push(session);
+      }
+      return sessions;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return [];
+  }
+}
+
 export function parseOpenCodeSessions(storageDir: string): Session[] {
+  try {
+    if (fs.statSync(storageDir).isFile()) return parseOpenCodeSqliteSessions(storageDir);
+  } catch {
+    return [];
+  }
+
   const sessions: Session[] = [];
   const sessionDir = path.join(storageDir, 'session', 'global');
   const rawSessions = readAllJsonInDir<OcSession>(sessionDir);
