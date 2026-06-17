@@ -58,18 +58,29 @@ function isPathUnder(pathMod: typeof import('path'), resolved: string, dir: stri
 }
 
 // `inAllowed` gates the write entirely; `isPersonal` gates auto-trust.
+let defaultWorkspaceRoot: string | undefined;
+
+export function setDefaultWorkspaceRoot(root: string | undefined): void {
+  defaultWorkspaceRoot = root;
+}
+
+function getWorkspaceRoot(): string | undefined {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const vscode = require('vscode') as typeof import('vscode');
+    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? defaultWorkspaceRoot;
+  } catch {
+    return defaultWorkspaceRoot;
+  }
+}
+
 function classifyRuleWritePath(pathMod: typeof import('path'), filePath: string): {
   resolved: string;
   inAllowed: boolean;
   isPersonal: boolean;
 } {
   const personalDir = getPersonalRulesDir();
-  let workspaceRoot: string | undefined;
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const vscode = require('vscode') as typeof import('vscode');
-    workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  } catch { /* test context */ }
+  const workspaceRoot = getWorkspaceRoot();
   const allowedDirs = [personalDir, ...(workspaceRoot ? [getProjectRulesDir(workspaceRoot)] : [])];
   const resolved = pathMod.resolve(filePath);
   return {
@@ -781,12 +792,7 @@ const rpcHandlers: TypedRpcHandlers = {
       version: r.version,
       rawSource: '',  // Don't send full source in list view
     }));
-    let workspaceRoot: string | undefined;
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const vscode = require('vscode') as typeof import('vscode');
-      workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    } catch { /* running in test context */ }
+    const workspaceRoot = getWorkspaceRoot();
     const layers = getRuleLayerInfo(workspaceRoot);
 
     // Compute per-rule weekly date histograms (last 8 weeks)

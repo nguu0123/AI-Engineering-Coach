@@ -5,10 +5,13 @@
 
 import * as crypto from 'crypto';
 import * as path from 'path';
-import * as vscode from 'vscode';
 import { WebviewMessage, ErrorResult } from '../core/types';
 
 export type RequestMessage = Extract<WebviewMessage, { type: 'request' }>;
+
+export interface WebviewMessageSink {
+  postMessage(message: unknown): Thenable<boolean> | Promise<boolean> | boolean | void;
+}
 
 /**
  * Build a typed error payload. Use this instead of `{ error: 'msg' }` literals
@@ -43,16 +46,16 @@ export function isRequestMessage(value: unknown): value is RequestMessage {
   return true;
 }
 
-export function postResponse(webview: vscode.Webview, id: string, data: unknown): void {
-  webview.postMessage({ type: 'response', id, data });
+export function postResponse(webview: WebviewMessageSink, id: string, data: unknown): void {
+  void webview.postMessage({ type: 'response', id, data });
 }
 
-export function postError(webview: vscode.Webview, id: string, message: string, extra: Record<string, unknown> = {}): void {
-  webview.postMessage({ type: 'response', id, data: errorResult(message, extra) });
+export function postError(webview: WebviewMessageSink, id: string, message: string, extra: Record<string, unknown> = {}): void {
+  void webview.postMessage({ type: 'response', id, data: errorResult(message, extra) });
 }
 
-export function postEvent(webview: vscode.Webview, method: string, data: unknown): void {
-  webview.postMessage({ type: 'event', method, data });
+export function postEvent(webview: WebviewMessageSink, method: string, data: unknown): void {
+  void webview.postMessage({ type: 'event', method, data });
 }
 
 export function getNonce(): string {

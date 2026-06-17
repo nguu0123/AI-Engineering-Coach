@@ -21,6 +21,7 @@ import { renderLevelUp } from './page-experiments';
 import { renderDataExplorer } from './page-data-explorer';
 import { renderRulePlayground } from './page-rule-playground';
 import { renderImageGallery } from './page-image-gallery';
+import { renderCoachChat } from './page-coach-chat';
 import { FF_TOKEN_REPORTING_ENABLED } from '../core/constants';
 
 function normalizePageForFeatureFlags(page: string): string {
@@ -649,6 +650,7 @@ function renderPage(page: string): void {
     case 'data-explorer': withErrorBoundary('Data Explorer', content, () => renderDataExplorer(content, currentFilter)); break;
     case 'rule-playground': withErrorBoundary('Rule Playground', content, () => renderRulePlayground(content, currentFilter)); break;
     case 'image-gallery': withErrorBoundary('Image Gallery', content, () => renderImageGallery(content, currentFilter)); break;
+    case 'coach-chat': withErrorBoundary('Coach', content, () => renderCoachChat(content, currentFilter)); break;
     default: render(html`<p>Unknown page</p>`, content);
   }
 }

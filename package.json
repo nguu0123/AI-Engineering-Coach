@@ -288,6 +288,8 @@
     "vscode:prepublish": "npm run build",
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
+    "site": "npm run build && node dist/local-server.js",
+    "site:serve": "node dist/local-server.js",
     "lint": "eslint src/",
     "bench": "vitest bench",
     "test": "vitest run",

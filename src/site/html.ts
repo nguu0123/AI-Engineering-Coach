@@ -3,22 +3,128 @@
  *  Licensed under the MIT License. See LICENSE in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import * as vscode from 'vscode';
-import { getNonce } from './panel-shared';
 import { FF_TOKEN_REPORTING_ENABLED } from '../core/constants';
 
-export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
-  const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'dist', 'webview', 'app.js'));
-  const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'dist', 'webview', 'styles.css'));
-  const nonce = getNonce();
+function localApiBootstrap(): string {
+  return `
+(function () {
+  var storageKey = 'aiEngineerCoach.webviewState';
+  var state = {};
+  var messageListenerReady = false;
+  var queuedEvents = [];
+  var originalAddEventListener = window.addEventListener.bind(window);
 
+  window.addEventListener = function (type, listener, options) {
+    var result = originalAddEventListener(type, listener, options);
+    if (type === 'message') {
+      messageListenerReady = true;
+      setTimeout(function () {
+        var pending = queuedEvents;
+        queuedEvents = [];
+        pending.forEach(function (data) {
+          window.dispatchEvent(new MessageEvent('message', { data: data }));
+        });
+      }, 0);
+    }
+    return result;
+  };
+
+  try {
+    state = JSON.parse(window.localStorage.getItem(storageKey) || '{}') || {};
+  } catch (_) {
+    state = {};
+  }
+
+  function emit(data) {
+    if (!messageListenerReady && data && data.type !== 'response') {
+      queuedEvents.push(data);
+      return;
+    }
+    window.dispatchEvent(new MessageEvent('message', { data: data }));
+  }
+
+  function emitResponse(id, data) {
+    emit({ type: 'response', id: id, data: data });
+  }
+
+  function isSafeHttpsUrl(value) {
+    if (typeof value !== 'string' || !value.toLowerCase().startsWith('https://')) return false;
+    try {
+      var url = new URL(value);
+      return url.protocol === 'https:' && !!url.hostname && !url.username && !url.password;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function connectEvents() {
+    if (!('EventSource' in window)) return;
+    var source = new EventSource('/api/events');
+    source.onmessage = function (event) {
+      try {
+        emit(JSON.parse(event.data));
+      } catch (_) {
+        // Ignore malformed server-sent events.
+      }
+    };
+  }
+
+  window.acquireVsCodeApi = function () {
+    return {
+      postMessage: function (message) {
+        if (!message || typeof message !== 'object') return;
+
+        if (message.type === 'request' && message.method === 'openExternal') {
+          var url = message.params && message.params.url;
+          if (isSafeHttpsUrl(url)) {
+            window.open(url, '_blank', 'noopener,noreferrer');
+            emitResponse(message.id, { ok: true });
+          } else {
+            emitResponse(message.id, { error: 'Invalid external URL' });
+          }
+          return;
+        }
+
+        fetch('/api/rpc', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(message),
+        }).then(function (response) {
+          return response.json();
+        }).then(function (payload) {
+          emit(payload);
+        }).catch(function (error) {
+          if (message.type === 'request' && message.id) {
+            emitResponse(message.id, { error: error && error.message ? error.message : 'Request failed' });
+          }
+        });
+      },
+      getState: function () {
+        return state;
+      },
+      setState: function (nextState) {
+        state = nextState || {};
+        try {
+          window.localStorage.setItem(storageKey, JSON.stringify(state));
+        } catch (_) {
+          // Best effort persistence.
+        }
+      },
+    };
+  };
+
+  setTimeout(connectEvents, 0);
+})();
+`;
+}
+
+export function getLocalDashboardHtml(): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src ${webview.cspSource} data:; font-src ${webview.cspSource}; require-trusted-types-for 'script'; trusted-types coach-html default;">
-<link href="${String(styleUri)}" rel="stylesheet">
+<link href="/assets/styles.css" rel="stylesheet">
 <title>AI Engineer Coach</title>
 </head>
 <body>
@@ -27,6 +133,7 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
     <ul class="nav-links">
       <li class="nav-group-header">Observe</li>
       <li><a href="#" data-page="dashboard" class="active"><span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="1" y="8" width="3" height="6" rx="0.5" fill="currentColor"/><rect x="5.5" y="5" width="3" height="9" rx="0.5" fill="currentColor"/><rect x="10" y="2" width="3" height="12" rx="0.5" fill="currentColor"/></svg></span> Dashboard</a></li>
+      <li><a href="#" data-page="coach-chat"><span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2.5 3.5h11v6.5h-6l-3.5 3v-3H2.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M5 6h6M5 8h4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg></span> Coach</a></li>
       <li><a href="#" data-page="timeline"><span class="nav-icon">&#9472;</span> Timeline<span class="nav-badge" id="badge-sessions"></span></a></li>
       <li><a href="#" data-page="image-gallery"><span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor" stroke-width="1.2"/><circle cx="5.5" cy="6.5" r="1.2" stroke="currentColor" stroke-width="1"/><path d="M2 11l3-3 2 2 4-4 3 3" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span> Coding Moments</a></li>
       <li class="nav-group-header">Measure</li>
@@ -60,24 +167,8 @@ export function getDashboardHtml(webview: vscode.Webview, extensionUri: vscode.U
   </nav>
   <main id="content"></main>
 </div>
-<script nonce="${nonce}" src="${String(scriptUri)}"></script>
+<script>${localApiBootstrap()}</script>
+<script src="/assets/app.js"></script>
 </body>
-</html>`;
-}
-
-export function getErrorHtml(message: string): string {
-  const escaped = message.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<style>
-body { background: #0d1117; color: #e6edf3; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-.error { text-align: center; max-width: 500px; }
-.error h2 { color: #f85149; }
-.error p { color: #8b949e; }
-</style>
-</head>
-<body><div class="error"><h2>Error</h2><p>${escaped}</p></div></body>
 </html>`;
 }

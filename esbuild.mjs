@@ -57,6 +57,18 @@ const cacheWriteWorkerBuild = esbuild.build({
   external: ['vscode'],
 });
 
+// Bundle the standalone local website server.
+const localServerBuild = esbuild.build({
+  entryPoints: ['src/site/server.ts'],
+  bundle: true,
+  platform: 'node',
+  target: 'es2022',
+  format: 'cjs',
+  outfile: 'dist/local-server.js',
+  sourcemap: true,
+  external: ['vscode'],
+});
+
 // Bundle the webview script
 const webviewBuild = esbuild.build({
   entryPoints: ['src/webview/app.ts'],
@@ -68,7 +80,7 @@ const webviewBuild = esbuild.build({
   sourcemap: true,
 });
 
-await Promise.all([extensionBuild, workerBuild, parseWorkerBuild, cacheWriteWorkerBuild, webviewBuild]);
+await Promise.all([extensionBuild, workerBuild, parseWorkerBuild, cacheWriteWorkerBuild, localServerBuild, webviewBuild]);
 
 // Copy static webview assets
 const webviewDist = 'dist/webview';
@@ -156,6 +168,16 @@ if (isWatch) {
     sourcemap: true,
     external: ['vscode'],
   });
+  const ctx6 = await esbuild.context({
+    entryPoints: ['src/site/server.ts'],
+    bundle: true,
+    platform: 'node',
+    target: 'es2022',
+    format: 'cjs',
+    outfile: 'dist/local-server.js',
+    sourcemap: true,
+    external: ['vscode'],
+  });
   const ctx4 = await esbuild.context({
     entryPoints: ['src/webview/app.ts'],
     bundle: true,
@@ -165,7 +187,7 @@ if (isWatch) {
     outfile: 'dist/webview/app.js',
     sourcemap: true,
   });
-  await Promise.all([ctx1.watch(), ctx2.watch(), ctx3.watch(), ctx4.watch(), ctx5.watch()]);
+  await Promise.all([ctx1.watch(), ctx2.watch(), ctx3.watch(), ctx4.watch(), ctx5.watch(), ctx6.watch()]);
   for (const source of cssSources) {
     fs.watch(source, () => {
       try {

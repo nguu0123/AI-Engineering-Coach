@@ -54,7 +54,42 @@ AI Engineer Coach reads your local AI session logs and turns them into actionabl
 
 Choose one of these paths.
 
-### Path 1 -- Prebuilt VSIX (easiest)
+### Path 1 -- Local website
+
+Prerequisites:
+
+- Node.js and npm
+
+Steps:
+
+```bash
+git clone https://github.com/microsoft/ai-engineering-coach.git
+cd ai-engineering-coach
+npm ci
+npm run site
+```
+
+Then open `http://127.0.0.1:3987`.
+
+The local website parses the same session sources as the extension and serves the dashboard from your machine. It supports core analytics, the Coach chat page, rule editor/playground/data explorer RPCs, AI-assisted rule and learning features, summary exports, skill installs, catalog fetches, repo scans, and GitHub SDLC data when `GITHUB_TOKEN` or `GH_TOKEN` is set.
+
+Useful options:
+
+```bash
+npm run site:serve -- --port 3990 --workspace /path/to/repo
+AIEC_EXPORT_DIR=/path/to/exports npm run site
+```
+
+AI features and Coach chat use an OpenAI-compatible provider in website mode:
+
+```bash
+AIEC_LLM_BASE_URL=http://127.0.0.1:11434/v1 AIEC_LLM_MODEL=llama3.1 npm run site
+OPENAI_API_KEY=... OPENAI_MODEL=gpt-4.1-mini npm run site
+```
+
+Supported provider variables: `AIEC_LLM_BASE_URL`, `AIEC_LLM_API_KEY`, `AIEC_LLM_MODEL`, `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL`, `OLLAMA_BASE_URL`, and `OLLAMA_MODEL`.
+
+### Path 2 -- Prebuilt VSIX
 
 Prerequisites:
 
@@ -78,7 +113,7 @@ code --install-extension ai-engineer-coach-*.vsix
 code --install-extension (Get-ChildItem . -Filter 'ai-engineer-coach-*.vsix' | Select-Object -First 1).FullName
 ```
 
-### Path 2 -- Dev Container build (no local Node.js/npm)
+### Path 3 -- Dev Container build (no local Node.js/npm)
 
 Prerequisites:
 
@@ -104,7 +139,7 @@ Press Ctrl+Shift+P
 Type Install from VSIX
 Browse to the .vsix file and select it
 
-### Path 3 -- Local build
+### Path 4 -- VS Code extension local build
 
 Prerequisites:
 
@@ -179,7 +214,7 @@ After install:
 - **Read-only** — the extension never modifies your session files
 - **Local analysis** — all parsing and analytics run entirely on your machine
 - **No proprietary telemetry** — the extension does not phone home or collect usage data
-- **Optional AI features** — some features (rule compiler, skill finder, context review) use the VS Code built-in Copilot language model API when explicitly invoked by the user
+- **Optional AI features** — local website AI actions use your configured OpenAI-compatible provider; extension AI actions use the VS Code built-in Copilot language model API when explicitly invoked by the user
 
 ---
 
